@@ -2611,14 +2611,40 @@ window.exportCalendarMonthCSV=function(){
 function renderLedger(){
   setHeader("Ledger","Manual entry · CSV import · Transaction history");
   const _ledgerTypeFilter = state._ledgerTypeFilter || "all";
+  const ledgerSearch = (state._ledgerSearch || "").trim().toLowerCase();
+  const ledgerAssetFilter = (state._ledgerAssetFilter || "all").toUpperCase();
+  const ledgerDateStart = state._ledgerDateStart || "";
+  const ledgerDateEnd = state._ledgerDateEnd || "";
   const txsSorted = [...state.txs].sort((a,b)=>b.ts-a.ts);
-  const filtered = _ledgerTypeFilter==="all" ? txsSorted : txsSorted.filter(t=>t.type===_ledgerTypeFilter);
+  const uniqueAssetList=[...new Set(state.txs.map(t=>String(t.asset||"").toUpperCase()).filter(Boolean))].sort();
+
+  const filtered = txsSorted.filter(t=>{
+    if(_ledgerTypeFilter!=="all" && t.type!==_ledgerTypeFilter) return false;
+    if(ledgerAssetFilter!=="ALL" && String(t.asset||"").toUpperCase()!==ledgerAssetFilter) return false;
+    if(ledgerDateStart){
+      const fromTs=new Date(`${ledgerDateStart}T00:00:00`).getTime();
+      if(Number.isFinite(fromTs) && t.ts<fromTs) return false;
+    }
+    if(ledgerDateEnd){
+      const toTs=new Date(`${ledgerDateEnd}T23:59:59`).getTime();
+      if(Number.isFinite(toTs) && t.ts>toTs) return false;
+    }
+    if(ledgerSearch){
+      const hay=[t.asset,t.type,t.venue,t.note,new Date(t.ts).toLocaleDateString()].join(" ").toLowerCase();
+      if(!hay.includes(ledgerSearch)) return false;
+    }
+    return true;
+  });
+
   // Stats
   const totalBuys=state.txs.filter(t=>t.type==="buy").length;
   const totalSells=state.txs.filter(t=>t.type==="sell").length;
   const uniqueAssets=[...new Set(state.txs.map(t=>t.asset))].length;
   const buyVal=state.txs.filter(t=>t.type==="buy").reduce((s,t)=>s+(t.qty*t.price),0);
   const sellVal=state.txs.filter(t=>t.type==="sell").reduce((s,t)=>s+(t.qty*t.price),0);
+  const filteredBuyVal=filtered.filter(t=>t.type==="buy").reduce((s,t)=>s+(t.qty*t.price),0);
+  const filteredSellVal=filtered.filter(t=>t.type==="sell").reduce((s,t)=>s+(t.qty*t.price),0);
+  const filteredNet=filteredSellVal-filteredBuyVal;
 
   $("#pageBody").innerHTML=`
     <div class="kpis" style="margin-bottom:10px;">
@@ -2627,6 +2653,12 @@ function renderLedger(){
       <div class="kpi-card"><div class="kpi-lbl">BUYS / SELLS</div><div class="kpi-val">${totalBuys} / ${totalSells}</div></div>
       <div class="kpi-card"><div class="kpi-lbl">BUY VALUE</div><div class="kpi-val good">${fmtUSD(buyVal)}</div></div>
       <div class="kpi-card" style="display:none;"><div class="kpi-lbl">SELL VALUE</div><div class="kpi-val bad">${fmtUSD(sellVal)}</div></div>
+    </div>
+    <div class="kpis" style="margin-top:-2px;margin-bottom:10px;">
+      <div class="kpi-card"><div class="kpi-lbl">FILTERED TXS</div><div class="kpi-val">${filtered.length}</div></div>
+      <div class="kpi-card"><div class="kpi-lbl">FILTERED BUYS</div><div class="kpi-val">${fmtUSD(filteredBuyVal)}</div></div>
+      <div class="kpi-card"><div class="kpi-lbl">FILTERED SELLS</div><div class="kpi-val">${fmtUSD(filteredSellVal)}</div></div>
+      <div class="kpi-card"><div class="kpi-lbl">FILTERED NET FLOW</div><div class="kpi-val ${filteredNet>=0?"good":"bad"}">${filteredNet>=0?"+":""}${fmtUSD(filteredNet)}</div></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start;">
       <div class="formPanel">
@@ -2674,11 +2706,21 @@ function renderLedger(){
           <span class="pill">${filtered.length} records</span>
         </div>
       </div>
+      <div class="panel-body" style="padding:8px 10px;border-bottom:1px solid var(--line2);display:grid;grid-template-columns:1fr 140px 140px 140px auto;gap:6px;align-items:end;">
+        <div class="field" style="margin:0;"><div class="label">Search</div><input id="ledgerSearch" class="input" placeholder="Asset, venue, note" value="${esc(state._ledgerSearch||"")}"/></div>
+        <div class="field" style="margin:0;"><div class="label">Asset</div><select id="ledgerAssetFilter" class="input"><option value="all">All assets</option>${uniqueAssetList.map(sym=>`<option value="${sym}" ${ledgerAssetFilter===sym?"selected":""}>${sym}</option>`).join("")}</select></div>
+        <div class="field" style="margin:0;"><div class="label">From</div><input id="ledgerDateStart" class="input" type="date" value="${ledgerDateStart}"/></div>
+        <div class="field" style="margin:0;"><div class="label">To</div><input id="ledgerDateEnd" class="input" type="date" value="${ledgerDateEnd}"/></div>
+        <div style="display:flex;gap:6px;justify-content:flex-end;">
+          <button class="btn secondary" id="ledgerClearFilters">Clear</button>
+          <button class="btn secondary" id="ledgerExportCsv">Export CSV</button>
+        </div>
+      </div>
       <div class="panel-body" style="padding:0;">
-        ${filtered.length===0?`<div class="empty"><div class="empty-t">No transactions</div><div class="empty-s">Add a transaction above or import a CSV file</div></div>`:
+        ${filtered.length===0?`<div class="empty"><div class="empty-t">No transactions</div><div class="empty-s">Adjust filters, add a transaction, or import a CSV file</div></div>`:
         `<div class="tableWrap"><table>
           <thead><tr><th>Date</th><th>Type</th><th>Asset</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Total</th><th class="r">Fee</th><th>Venue</th><th>Note</th><th>Actions</th></tr></thead>
-          <tbody>${filtered.slice(0,100).map(t=>`<tr>
+          <tbody>${filtered.slice(0,250).map(t=>`<tr>
             <td class="mono">${new Date(t.ts).toLocaleDateString()} ${new Date(t.ts).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</td>
             <td><span class="pill ${t.type==="buy"?"good":t.type==="sell"?"bad":""}" style="font-size:9px;padding:2px 6px;">${t.type}</span></td>
             <td><strong>${esc(t.asset)}</strong></td>
@@ -2722,6 +2764,13 @@ function renderLedger(){
     drop.addEventListener("drop",e=>{e.preventDefault();drop.classList.remove("over");const f=e.dataTransfer?.files?.[0];if(f)parseCSVFile(f);});
     fileInput?.addEventListener("change",e=>{const f=e.target?.files?.[0];if(f)parseCSVFile(f);});
   }
+
+  $("#ledgerSearch")?.addEventListener("input",e=>window.setLedgerSearch(e.target.value));
+  $("#ledgerAssetFilter")?.addEventListener("change",e=>window.setLedgerAssetFilter(e.target.value));
+  $("#ledgerDateStart")?.addEventListener("change",e=>window.setLedgerDateRange(e.target.value,state._ledgerDateEnd||""));
+  $("#ledgerDateEnd")?.addEventListener("change",e=>window.setLedgerDateRange(state._ledgerDateStart||"",e.target.value));
+  $("#ledgerClearFilters")?.addEventListener("click",()=>window.clearLedgerFilters());
+  $("#ledgerExportCsv")?.addEventListener("click",()=>window.exportLedgerCSV());
 }
 
 window.deleteTx = function(id){
@@ -2730,6 +2779,43 @@ window.deleteTx = function(id){
   save();toast("Transaction deleted","warn");render();
 };
 window.setLedgerFilter = function(type){ state._ledgerTypeFilter=type; save(); renderLedger(); };
+window.setLedgerSearch = function(q){ state._ledgerSearch=q||""; save(); renderLedger(); };
+window.setLedgerAssetFilter = function(sym){ state._ledgerAssetFilter=(sym||"all").toUpperCase(); save(); renderLedger(); };
+window.setLedgerDateRange = function(from,to){ state._ledgerDateStart=from||""; state._ledgerDateEnd=to||""; save(); renderLedger(); };
+window.clearLedgerFilters = function(){ state._ledgerSearch=""; state._ledgerAssetFilter="all"; state._ledgerDateStart=""; state._ledgerDateEnd=""; state._ledgerTypeFilter="all"; save(); renderLedger(); };
+window.exportLedgerCSV = function(){
+  const type=(state._ledgerTypeFilter||"all");
+  const search=(state._ledgerSearch||"").trim().toLowerCase();
+  const asset=(state._ledgerAssetFilter||"all").toUpperCase();
+  const from=state._ledgerDateStart||"";
+  const to=state._ledgerDateEnd||"";
+  const rows=["date,type,asset,qty,price,total,fee,venue,note,source"];
+  const txs=[...state.txs].sort((a,b)=>b.ts-a.ts).filter(t=>{
+    if(type!=="all"&&t.type!==type) return false;
+    if(asset!=="ALL"&&String(t.asset||"").toUpperCase()!==asset) return false;
+    if(from){const fromTs=new Date(`${from}T00:00:00`).getTime(); if(Number.isFinite(fromTs)&&t.ts<fromTs) return false;}
+    if(to){const toTs=new Date(`${to}T23:59:59`).getTime(); if(Number.isFinite(toTs)&&t.ts>toTs) return false;}
+    if(search){
+      const hay=[t.asset,t.type,t.venue,t.note,new Date(t.ts).toLocaleDateString()].join(" ").toLowerCase();
+      if(!hay.includes(search)) return false;
+    }
+    return true;
+  });
+  for(const t of txs){
+    const dt=new Date(t.ts).toISOString();
+    const safe=(v)=>`"${String(v??"").replaceAll('"','""')}"`;
+    rows.push([dt,t.type,t.asset,Number(t.qty)||0,Number(t.price)||0,(Number(t.qty)||0)*(Number(t.price)||0),Number(t.fee)||0,safe(t.venue||""),safe(t.note||""),t.source||""].join(","));
+  }
+  const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=`coincompass-ledger-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
 
 function parseCSVFile(file){
   const reader = new FileReader();
