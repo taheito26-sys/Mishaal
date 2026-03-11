@@ -2492,6 +2492,35 @@ function renderCalendar(){
   const totalT=Object.values(mData).reduce((s,d)=>s+d.trades,0);
   const tradeDays=Object.values(mData).filter(d=>d.trades>0).length;
   const selData=selectedDay?mData[selectedDay]:null;
+  const tradingDayEntries=Object.entries(mData)
+    .filter(([,d])=>d.trades>0)
+    .map(([day,d])=>({day:Number(day),pnl:d.pnl,trades:d.trades}));
+  const wins=tradingDayEntries.filter(d=>d.pnl>0.01).length;
+  const losses=tradingDayEntries.filter(d=>d.pnl<-0.01).length;
+  let bestDay=null,worstDay=null,winStreak=0,lossStreak=0,maxWinStreak=0,maxLossStreak=0;
+  for(const day of tradingDayEntries){
+    if(bestDay===null||day.pnl>bestDay.pnl) bestDay=day;
+    if(worstDay===null||day.pnl<worstDay.pnl) worstDay=day;
+    if(day.pnl>0.01){
+      winStreak++;lossStreak=0;
+    }else if(day.pnl<-0.01){
+      lossStreak++;winStreak=0;
+    }else{
+      winStreak=0;lossStreak=0;
+    }
+    if(winStreak>maxWinStreak) maxWinStreak=winStreak;
+    if(lossStreak>maxLossStreak) maxLossStreak=lossStreak;
+  }
+  const weekData=Array.from({length:7},()=>({pnl:0,trades:0}));
+  for(const day of tradingDayEntries){
+    const weekday=new Date(year,month,day.day).getDay();
+    weekData[weekday].pnl+=day.pnl;
+    weekData[weekday].trades+=day.trades;
+  }
+  const bestWeekday=weekData
+    .map((w,i)=>({name:dn[i],pnl:w.pnl,trades:w.trades}))
+    .filter(w=>w.trades>0)
+    .sort((a,b)=>b.pnl-a.pnl)[0]||null;
 
   let calHtml=`<div class="cal-grid">${dn.map(d=>`<div class="cal-hdr">${d}</div>`).join("")}`;
   for(let i=0;i<firstDay;i++) calHtml+=`<div class="cal-day empty"></div>`;
@@ -2517,6 +2546,13 @@ function renderCalendar(){
       <div class="cal-stat"><div class="kpi-lbl">Monthly P&L</div><div class="kpi-val ${totalP>=0?"good":"bad"}">${fmtUSD(totalP)}</div></div>
       <div class="cal-stat"><div class="kpi-lbl">Total Trades</div><div class="kpi-val">${totalT}</div></div>
       <div class="cal-stat"><div class="kpi-lbl">Trading Days</div><div class="kpi-val">${tradeDays}</div></div>
+      <div class="cal-stat"><div class="kpi-lbl">Win / Loss Days</div><div class="kpi-val">${wins} / ${losses}</div></div>
+    </div>
+    <div class="cal-stats" style="margin-top:-2px;">
+      <div class="cal-stat"><div class="kpi-lbl">Best Day</div><div class="kpi-val ${bestDay&&bestDay.pnl>=0?"good":"bad"}">${bestDay?`${mn[month].slice(0,3)} ${bestDay.day} · ${fmtUSD(bestDay.pnl)}`:"—"}</div></div>
+      <div class="cal-stat"><div class="kpi-lbl">Worst Day</div><div class="kpi-val ${worstDay&&worstDay.pnl>=0?"good":"bad"}">${worstDay?`${mn[month].slice(0,3)} ${worstDay.day} · ${fmtUSD(worstDay.pnl)}`:"—"}</div></div>
+      <div class="cal-stat"><div class="kpi-lbl">Longest Streak</div><div class="kpi-val">${maxWinStreak>0?`${maxWinStreak}W`:"0W"} / ${maxLossStreak>0?`${maxLossStreak}L`:"0L"}</div></div>
+      <div class="cal-stat"><div class="kpi-lbl">Best Weekday</div><div class="kpi-val ${bestWeekday&&bestWeekday.pnl>=0?"good":"bad"}">${bestWeekday?`${bestWeekday.name} · ${fmtUSD(bestWeekday.pnl)}`:"—"}</div></div>
     </div>
     ${allCoinsThisMonth.length>0?`<div class="panel" style="margin-bottom:8px;"><div class="panel-head"><h2>Coin Filter</h2><span class="pill">${activeCoinFilter.length>0?activeCoinFilter.join(", "):"All coins"}</span></div><div class="panel-body" style="padding:6px 10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">${allCoinsThisMonth.map(s=>`<button class="btn ${activeCoinFilter.includes(s)?"":"secondary"}" style="padding:3px 8px;font-size:10px;" onclick="window.calToggleCoinFilter('${s}')">${esc(s)}</button>`).join("")}${activeCoinFilter.length>0?`<button class="btn secondary" style="padding:3px 8px;font-size:10px;margin-left:4px;" onclick="window.calClearCoinFilter()">✕ Clear</button>`:""}</div></div>`:""}
     <div class="panel">
@@ -2526,6 +2562,7 @@ function renderCalendar(){
           <button class="btn secondary" id="cal_prev">← Prev</button>
           <button class="btn secondary" id="cal_today">Today</button>
           <button class="btn secondary" id="cal_next">Next →</button>
+          <button class="btn secondary" id="cal_export">Export CSV</button>
         </div>
       </div>
       <div class="panel-body">${calHtml}</div>
@@ -2535,6 +2572,7 @@ function renderCalendar(){
   $("#cal_prev")?.addEventListener("click",()=>{let{year:y,month:m}=state.cal;m--;if(m<0){m=11;y--;}state.cal={year:y,month:m,selectedDay:null};save();renderCalendar();});
   $("#cal_next")?.addEventListener("click",()=>{let{year:y,month:m}=state.cal;m++;if(m>11){m=0;y++;}state.cal={year:y,month:m,selectedDay:null};save();renderCalendar();});
   $("#cal_today")?.addEventListener("click",()=>{state.cal={year:new Date().getFullYear(),month:new Date().getMonth(),selectedDay:null};save();renderCalendar();});
+  $("#cal_export")?.addEventListener("click",()=>window.exportCalendarMonthCSV());
 }
 window.selectCalDay=d=>{state.cal.selectedDay=state.cal.selectedDay===d?null:d;save();renderCalendar();};
 window.calToggleCoinFilter=function(sym){
@@ -2544,19 +2582,69 @@ window.calToggleCoinFilter=function(sym){
   save();renderCalendar();
 };
 window.calClearCoinFilter=function(){state.calCoinFilter=[];save();renderCalendar();};
+window.exportCalendarMonthCSV=function(){
+  const {year,month}=state.cal;
+  const rows=["date,trades,pnl_usd,assets"];
+  const allCoinsThisMonth=[...new Set(state.txs.filter(t=>{const d=new Date(t.ts);return d.getFullYear()===year&&d.getMonth()===month;}).map(t=>t.asset))];
+  const activeCoinFilter=(state.calCoinFilter||[]).filter(s=>allCoinsThisMonth.includes(s));
+  const filteredTxs=activeCoinFilter.length>0?state.txs.filter(t=>activeCoinFilter.includes(t.asset)):state.txs;
+  const daysInM=new Date(year,month+1,0).getDate();
+  for(let day=1;day<=daysInM;day++){
+    const dailyTx=filteredTxs.filter(t=>{const dt=new Date(t.ts);return dt.getFullYear()===year&&dt.getMonth()===month&&dt.getDate()===day;});
+    if(dailyTx.length===0) continue;
+    const pnl=dailyTx.reduce((sum,t)=>sum+(t.type==="buy"?-(t.qty*t.price):t.type==="sell"?(t.qty*t.price):0),0);
+    const assetList=[...new Set(dailyTx.map(t=>t.asset))].join("|");
+    rows.push(`${year}-${String(month+1).padStart(2,"0")}-${String(day).padStart(2,"0")},${dailyTx.length},${pnl.toFixed(2)},${assetList}`);
+  }
+  const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=`coincompass-calendar-${year}-${String(month+1).padStart(2,"0")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
 
 // ── LEDGER ───────────────────────────────────────────────────────
 function renderLedger(){
   setHeader("Ledger","Manual entry · CSV import · Transaction history");
   const _ledgerTypeFilter = state._ledgerTypeFilter || "all";
+  const ledgerSearch = (state._ledgerSearch || "").trim().toLowerCase();
+  const ledgerAssetFilter = (state._ledgerAssetFilter || "all").toUpperCase();
+  const ledgerDateStart = state._ledgerDateStart || "";
+  const ledgerDateEnd = state._ledgerDateEnd || "";
   const txsSorted = [...state.txs].sort((a,b)=>b.ts-a.ts);
-  const filtered = _ledgerTypeFilter==="all" ? txsSorted : txsSorted.filter(t=>t.type===_ledgerTypeFilter);
+  const uniqueAssetList=[...new Set(state.txs.map(t=>String(t.asset||"").toUpperCase()).filter(Boolean))].sort();
+
+  const filtered = txsSorted.filter(t=>{
+    if(_ledgerTypeFilter!=="all" && t.type!==_ledgerTypeFilter) return false;
+    if(ledgerAssetFilter!=="ALL" && String(t.asset||"").toUpperCase()!==ledgerAssetFilter) return false;
+    if(ledgerDateStart){
+      const fromTs=new Date(`${ledgerDateStart}T00:00:00`).getTime();
+      if(Number.isFinite(fromTs) && t.ts<fromTs) return false;
+    }
+    if(ledgerDateEnd){
+      const toTs=new Date(`${ledgerDateEnd}T23:59:59`).getTime();
+      if(Number.isFinite(toTs) && t.ts>toTs) return false;
+    }
+    if(ledgerSearch){
+      const hay=[t.asset,t.type,t.venue,t.note,new Date(t.ts).toLocaleDateString()].join(" ").toLowerCase();
+      if(!hay.includes(ledgerSearch)) return false;
+    }
+    return true;
+  });
+
   // Stats
   const totalBuys=state.txs.filter(t=>t.type==="buy").length;
   const totalSells=state.txs.filter(t=>t.type==="sell").length;
   const uniqueAssets=[...new Set(state.txs.map(t=>t.asset))].length;
   const buyVal=state.txs.filter(t=>t.type==="buy").reduce((s,t)=>s+(t.qty*t.price),0);
   const sellVal=state.txs.filter(t=>t.type==="sell").reduce((s,t)=>s+(t.qty*t.price),0);
+  const filteredBuyVal=filtered.filter(t=>t.type==="buy").reduce((s,t)=>s+(t.qty*t.price),0);
+  const filteredSellVal=filtered.filter(t=>t.type==="sell").reduce((s,t)=>s+(t.qty*t.price),0);
+  const filteredNet=filteredSellVal-filteredBuyVal;
 
   $("#pageBody").innerHTML=`
     <div class="kpis" style="margin-bottom:10px;">
@@ -2565,6 +2653,12 @@ function renderLedger(){
       <div class="kpi-card"><div class="kpi-lbl">BUYS / SELLS</div><div class="kpi-val">${totalBuys} / ${totalSells}</div></div>
       <div class="kpi-card"><div class="kpi-lbl">BUY VALUE</div><div class="kpi-val good">${fmtUSD(buyVal)}</div></div>
       <div class="kpi-card" style="display:none;"><div class="kpi-lbl">SELL VALUE</div><div class="kpi-val bad">${fmtUSD(sellVal)}</div></div>
+    </div>
+    <div class="kpis" style="margin-top:-2px;margin-bottom:10px;">
+      <div class="kpi-card"><div class="kpi-lbl">FILTERED TXS</div><div class="kpi-val">${filtered.length}</div></div>
+      <div class="kpi-card"><div class="kpi-lbl">FILTERED BUYS</div><div class="kpi-val">${fmtUSD(filteredBuyVal)}</div></div>
+      <div class="kpi-card"><div class="kpi-lbl">FILTERED SELLS</div><div class="kpi-val">${fmtUSD(filteredSellVal)}</div></div>
+      <div class="kpi-card"><div class="kpi-lbl">FILTERED NET FLOW</div><div class="kpi-val ${filteredNet>=0?"good":"bad"}">${filteredNet>=0?"+":""}${fmtUSD(filteredNet)}</div></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start;">
       <div class="formPanel">
@@ -2612,11 +2706,21 @@ function renderLedger(){
           <span class="pill">${filtered.length} records</span>
         </div>
       </div>
+      <div class="panel-body" style="padding:8px 10px;border-bottom:1px solid var(--line2);display:grid;grid-template-columns:1fr 140px 140px 140px auto;gap:6px;align-items:end;">
+        <div class="field" style="margin:0;"><div class="label">Search</div><input id="ledgerSearch" class="input" placeholder="Asset, venue, note" value="${esc(state._ledgerSearch||"")}"/></div>
+        <div class="field" style="margin:0;"><div class="label">Asset</div><select id="ledgerAssetFilter" class="input"><option value="all">All assets</option>${uniqueAssetList.map(sym=>`<option value="${sym}" ${ledgerAssetFilter===sym?"selected":""}>${sym}</option>`).join("")}</select></div>
+        <div class="field" style="margin:0;"><div class="label">From</div><input id="ledgerDateStart" class="input" type="date" value="${ledgerDateStart}"/></div>
+        <div class="field" style="margin:0;"><div class="label">To</div><input id="ledgerDateEnd" class="input" type="date" value="${ledgerDateEnd}"/></div>
+        <div style="display:flex;gap:6px;justify-content:flex-end;">
+          <button class="btn secondary" id="ledgerClearFilters">Clear</button>
+          <button class="btn secondary" id="ledgerExportCsv">Export CSV</button>
+        </div>
+      </div>
       <div class="panel-body" style="padding:0;">
-        ${filtered.length===0?`<div class="empty"><div class="empty-t">No transactions</div><div class="empty-s">Add a transaction above or import a CSV file</div></div>`:
+        ${filtered.length===0?`<div class="empty"><div class="empty-t">No transactions</div><div class="empty-s">Adjust filters, add a transaction, or import a CSV file</div></div>`:
         `<div class="tableWrap"><table>
           <thead><tr><th>Date</th><th>Type</th><th>Asset</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Total</th><th class="r">Fee</th><th>Venue</th><th>Note</th><th>Actions</th></tr></thead>
-          <tbody>${filtered.slice(0,100).map(t=>`<tr>
+          <tbody>${filtered.slice(0,250).map(t=>`<tr>
             <td class="mono">${new Date(t.ts).toLocaleDateString()} ${new Date(t.ts).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</td>
             <td><span class="pill ${t.type==="buy"?"good":t.type==="sell"?"bad":""}" style="font-size:9px;padding:2px 6px;">${t.type}</span></td>
             <td><strong>${esc(t.asset)}</strong></td>
@@ -2660,6 +2764,13 @@ function renderLedger(){
     drop.addEventListener("drop",e=>{e.preventDefault();drop.classList.remove("over");const f=e.dataTransfer?.files?.[0];if(f)parseCSVFile(f);});
     fileInput?.addEventListener("change",e=>{const f=e.target?.files?.[0];if(f)parseCSVFile(f);});
   }
+
+  $("#ledgerSearch")?.addEventListener("input",e=>window.setLedgerSearch(e.target.value));
+  $("#ledgerAssetFilter")?.addEventListener("change",e=>window.setLedgerAssetFilter(e.target.value));
+  $("#ledgerDateStart")?.addEventListener("change",e=>window.setLedgerDateRange(e.target.value,state._ledgerDateEnd||""));
+  $("#ledgerDateEnd")?.addEventListener("change",e=>window.setLedgerDateRange(state._ledgerDateStart||"",e.target.value));
+  $("#ledgerClearFilters")?.addEventListener("click",()=>window.clearLedgerFilters());
+  $("#ledgerExportCsv")?.addEventListener("click",()=>window.exportLedgerCSV());
 }
 
 window.deleteTx = function(id){
@@ -2668,6 +2779,43 @@ window.deleteTx = function(id){
   save();toast("Transaction deleted","warn");render();
 };
 window.setLedgerFilter = function(type){ state._ledgerTypeFilter=type; save(); renderLedger(); };
+window.setLedgerSearch = function(q){ state._ledgerSearch=q||""; save(); renderLedger(); };
+window.setLedgerAssetFilter = function(sym){ state._ledgerAssetFilter=(sym||"all").toUpperCase(); save(); renderLedger(); };
+window.setLedgerDateRange = function(from,to){ state._ledgerDateStart=from||""; state._ledgerDateEnd=to||""; save(); renderLedger(); };
+window.clearLedgerFilters = function(){ state._ledgerSearch=""; state._ledgerAssetFilter="all"; state._ledgerDateStart=""; state._ledgerDateEnd=""; state._ledgerTypeFilter="all"; save(); renderLedger(); };
+window.exportLedgerCSV = function(){
+  const type=(state._ledgerTypeFilter||"all");
+  const search=(state._ledgerSearch||"").trim().toLowerCase();
+  const asset=(state._ledgerAssetFilter||"all").toUpperCase();
+  const from=state._ledgerDateStart||"";
+  const to=state._ledgerDateEnd||"";
+  const rows=["date,type,asset,qty,price,total,fee,venue,note,source"];
+  const txs=[...state.txs].sort((a,b)=>b.ts-a.ts).filter(t=>{
+    if(type!=="all"&&t.type!==type) return false;
+    if(asset!=="ALL"&&String(t.asset||"").toUpperCase()!==asset) return false;
+    if(from){const fromTs=new Date(`${from}T00:00:00`).getTime(); if(Number.isFinite(fromTs)&&t.ts<fromTs) return false;}
+    if(to){const toTs=new Date(`${to}T23:59:59`).getTime(); if(Number.isFinite(toTs)&&t.ts>toTs) return false;}
+    if(search){
+      const hay=[t.asset,t.type,t.venue,t.note,new Date(t.ts).toLocaleDateString()].join(" ").toLowerCase();
+      if(!hay.includes(search)) return false;
+    }
+    return true;
+  });
+  for(const t of txs){
+    const dt=new Date(t.ts).toISOString();
+    const safe=(v)=>`"${String(v??"").replaceAll('"','""')}"`;
+    rows.push([dt,t.type,t.asset,Number(t.qty)||0,Number(t.price)||0,(Number(t.qty)||0)*(Number(t.price)||0),Number(t.fee)||0,safe(t.venue||""),safe(t.note||""),t.source||""].join(","));
+  }
+  const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=`coincompass-ledger-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
 
 function parseCSVFile(file){
   const reader = new FileReader();
