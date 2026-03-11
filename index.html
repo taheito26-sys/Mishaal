@@ -2492,6 +2492,35 @@ function renderCalendar(){
   const totalT=Object.values(mData).reduce((s,d)=>s+d.trades,0);
   const tradeDays=Object.values(mData).filter(d=>d.trades>0).length;
   const selData=selectedDay?mData[selectedDay]:null;
+  const tradingDayEntries=Object.entries(mData)
+    .filter(([,d])=>d.trades>0)
+    .map(([day,d])=>({day:Number(day),pnl:d.pnl,trades:d.trades}));
+  const wins=tradingDayEntries.filter(d=>d.pnl>0.01).length;
+  const losses=tradingDayEntries.filter(d=>d.pnl<-0.01).length;
+  let bestDay=null,worstDay=null,winStreak=0,lossStreak=0,maxWinStreak=0,maxLossStreak=0;
+  for(const day of tradingDayEntries){
+    if(bestDay===null||day.pnl>bestDay.pnl) bestDay=day;
+    if(worstDay===null||day.pnl<worstDay.pnl) worstDay=day;
+    if(day.pnl>0.01){
+      winStreak++;lossStreak=0;
+    }else if(day.pnl<-0.01){
+      lossStreak++;winStreak=0;
+    }else{
+      winStreak=0;lossStreak=0;
+    }
+    if(winStreak>maxWinStreak) maxWinStreak=winStreak;
+    if(lossStreak>maxLossStreak) maxLossStreak=lossStreak;
+  }
+  const weekData=Array.from({length:7},()=>({pnl:0,trades:0}));
+  for(const day of tradingDayEntries){
+    const weekday=new Date(year,month,day.day).getDay();
+    weekData[weekday].pnl+=day.pnl;
+    weekData[weekday].trades+=day.trades;
+  }
+  const bestWeekday=weekData
+    .map((w,i)=>({name:dn[i],pnl:w.pnl,trades:w.trades}))
+    .filter(w=>w.trades>0)
+    .sort((a,b)=>b.pnl-a.pnl)[0]||null;
 
   let calHtml=`<div class="cal-grid">${dn.map(d=>`<div class="cal-hdr">${d}</div>`).join("")}`;
   for(let i=0;i<firstDay;i++) calHtml+=`<div class="cal-day empty"></div>`;
@@ -2517,6 +2546,13 @@ function renderCalendar(){
       <div class="cal-stat"><div class="kpi-lbl">Monthly P&L</div><div class="kpi-val ${totalP>=0?"good":"bad"}">${fmtUSD(totalP)}</div></div>
       <div class="cal-stat"><div class="kpi-lbl">Total Trades</div><div class="kpi-val">${totalT}</div></div>
       <div class="cal-stat"><div class="kpi-lbl">Trading Days</div><div class="kpi-val">${tradeDays}</div></div>
+      <div class="cal-stat"><div class="kpi-lbl">Win / Loss Days</div><div class="kpi-val">${wins} / ${losses}</div></div>
+    </div>
+    <div class="cal-stats" style="margin-top:-2px;">
+      <div class="cal-stat"><div class="kpi-lbl">Best Day</div><div class="kpi-val ${bestDay&&bestDay.pnl>=0?"good":"bad"}">${bestDay?`${mn[month].slice(0,3)} ${bestDay.day} · ${fmtUSD(bestDay.pnl)}`:"—"}</div></div>
+      <div class="cal-stat"><div class="kpi-lbl">Worst Day</div><div class="kpi-val ${worstDay&&worstDay.pnl>=0?"good":"bad"}">${worstDay?`${mn[month].slice(0,3)} ${worstDay.day} · ${fmtUSD(worstDay.pnl)}`:"—"}</div></div>
+      <div class="cal-stat"><div class="kpi-lbl">Longest Streak</div><div class="kpi-val">${maxWinStreak>0?`${maxWinStreak}W`:"0W"} / ${maxLossStreak>0?`${maxLossStreak}L`:"0L"}</div></div>
+      <div class="cal-stat"><div class="kpi-lbl">Best Weekday</div><div class="kpi-val ${bestWeekday&&bestWeekday.pnl>=0?"good":"bad"}">${bestWeekday?`${bestWeekday.name} · ${fmtUSD(bestWeekday.pnl)}`:"—"}</div></div>
     </div>
     ${allCoinsThisMonth.length>0?`<div class="panel" style="margin-bottom:8px;"><div class="panel-head"><h2>Coin Filter</h2><span class="pill">${activeCoinFilter.length>0?activeCoinFilter.join(", "):"All coins"}</span></div><div class="panel-body" style="padding:6px 10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">${allCoinsThisMonth.map(s=>`<button class="btn ${activeCoinFilter.includes(s)?"":"secondary"}" style="padding:3px 8px;font-size:10px;" onclick="window.calToggleCoinFilter('${s}')">${esc(s)}</button>`).join("")}${activeCoinFilter.length>0?`<button class="btn secondary" style="padding:3px 8px;font-size:10px;margin-left:4px;" onclick="window.calClearCoinFilter()">✕ Clear</button>`:""}</div></div>`:""}
     <div class="panel">
@@ -2526,6 +2562,7 @@ function renderCalendar(){
           <button class="btn secondary" id="cal_prev">← Prev</button>
           <button class="btn secondary" id="cal_today">Today</button>
           <button class="btn secondary" id="cal_next">Next →</button>
+          <button class="btn secondary" id="cal_export">Export CSV</button>
         </div>
       </div>
       <div class="panel-body">${calHtml}</div>
@@ -2535,6 +2572,7 @@ function renderCalendar(){
   $("#cal_prev")?.addEventListener("click",()=>{let{year:y,month:m}=state.cal;m--;if(m<0){m=11;y--;}state.cal={year:y,month:m,selectedDay:null};save();renderCalendar();});
   $("#cal_next")?.addEventListener("click",()=>{let{year:y,month:m}=state.cal;m++;if(m>11){m=0;y++;}state.cal={year:y,month:m,selectedDay:null};save();renderCalendar();});
   $("#cal_today")?.addEventListener("click",()=>{state.cal={year:new Date().getFullYear(),month:new Date().getMonth(),selectedDay:null};save();renderCalendar();});
+  $("#cal_export")?.addEventListener("click",()=>window.exportCalendarMonthCSV());
 }
 window.selectCalDay=d=>{state.cal.selectedDay=state.cal.selectedDay===d?null:d;save();renderCalendar();};
 window.calToggleCoinFilter=function(sym){
@@ -2544,6 +2582,30 @@ window.calToggleCoinFilter=function(sym){
   save();renderCalendar();
 };
 window.calClearCoinFilter=function(){state.calCoinFilter=[];save();renderCalendar();};
+window.exportCalendarMonthCSV=function(){
+  const {year,month}=state.cal;
+  const rows=["date,trades,pnl_usd,assets"];
+  const allCoinsThisMonth=[...new Set(state.txs.filter(t=>{const d=new Date(t.ts);return d.getFullYear()===year&&d.getMonth()===month;}).map(t=>t.asset))];
+  const activeCoinFilter=(state.calCoinFilter||[]).filter(s=>allCoinsThisMonth.includes(s));
+  const filteredTxs=activeCoinFilter.length>0?state.txs.filter(t=>activeCoinFilter.includes(t.asset)):state.txs;
+  const daysInM=new Date(year,month+1,0).getDate();
+  for(let day=1;day<=daysInM;day++){
+    const dailyTx=filteredTxs.filter(t=>{const dt=new Date(t.ts);return dt.getFullYear()===year&&dt.getMonth()===month&&dt.getDate()===day;});
+    if(dailyTx.length===0) continue;
+    const pnl=dailyTx.reduce((sum,t)=>sum+(t.type==="buy"?-(t.qty*t.price):t.type==="sell"?(t.qty*t.price):0),0);
+    const assetList=[...new Set(dailyTx.map(t=>t.asset))].join("|");
+    rows.push(`${year}-${String(month+1).padStart(2,"0")}-${String(day).padStart(2,"0")},${dailyTx.length},${pnl.toFixed(2)},${assetList}`);
+  }
+  const blob=new Blob([rows.join("\n")],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=`coincompass-calendar-${year}-${String(month+1).padStart(2,"0")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
 
 // ── LEDGER ───────────────────────────────────────────────────────
 function renderLedger(){
