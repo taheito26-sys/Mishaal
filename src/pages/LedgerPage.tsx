@@ -7,18 +7,12 @@ import { useLedgerMutations } from "../hooks/useLedgerMutations";
 import { useImportState } from "../hooks/useImportState";
 
 type Tab = "journal" | "add" | "import" | "connect";
-
 type Draft = { type: string; asset: string; qty: string; price: string; fee: string; venue: string; note: string };
 const defaultDraft: Draft = { type: "buy", asset: "", qty: "", price: "", fee: "", venue: "", note: "" };
 
 const WriteStatusBanner: React.FC<{ status: string; onRetry: () => Promise<void> }> = ({ status, onRetry }) => {
   if (status === "ready") return null;
-  return (
-    <div>
-      <b>Write status: {status}</b>
-      <button type="button" onClick={() => void onRetry()} disabled={status === "checking"}>Retry</button>
-    </div>
-  );
+  return (<div><b>Write status: {status}</b> <button type="button" onClick={() => void onRetry()} disabled={status === "checking"}>Retry</button></div>);
 };
 
 const LedgerPage: React.FC = () => {
@@ -34,9 +28,21 @@ const LedgerPage: React.FC = () => {
   const m = useLedgerMutations();
 
   const importState = useImportState({
-    lookupImportRows: async ({ fingerprints, rows, exchange }) => {
-      if (m.lookupImportRows) return m.lookupImportRows({ fingerprints, rows, exchange });
-      return { exists: [], conflicts: [] };
+    lookupImportRows: async ({ rows, exchange }) => {
+      if (m.lookupImportRows) return m.lookupImportRows({ rows, exchange });
+      const fingerprints = new Set((transactions as any[])
+        .filter(t => String(t.source || "").includes("csv"))
+        .map(t => `${exchange}:${Math.floor(Number(t.timestamp || t.ts) / 1000)}:${String(t.asset || "").toUpperCase()}:${t.type}:${Number(t.qty || 0).toFixed(8)}:${Number(t.price || 0).toFixed(8)}`));
+      const existingRows = rows
+        .map(r => ({
+          fingerprint: r.fingerprint || "",
+          symbol: r.symbol,
+          timestampSec: Math.floor(r.timestamp / 1000),
+          qty: r.qty,
+          unitPrice: r.unitPrice,
+        }))
+        .filter(r => fingerprints.has(`${exchange}:${r.timestampSec}:${r.symbol}:buy:${r.qty.toFixed(8)}:${r.unitPrice.toFixed(8)}`) || fingerprints.has(`${exchange}:${r.timestampSec}:${r.symbol}:sell:${r.qty.toFixed(8)}:${r.unitPrice.toFixed(8)}`));
+      return { existingRows };
     },
     commitImportedTransactions: async ({ exchange, rows, onConflict }) => {
       await m.commitImportedTransactions({ exchange, rows, onConflict });
@@ -45,6 +51,9 @@ const LedgerPage: React.FC = () => {
       if (m.createImportedFile) await m.createImportedFile(payload);
       else if (m.recordImportedFile) await m.recordImportedFile(payload);
     },
+    fetchImportHistory: m.fetchImportHistory,
+    rollbackImport: m.rollbackImport,
+    clearImportedTransactions: m.clearImportedTransactions,
     refresh: hydrateFromBackend,
   });
 
@@ -75,9 +84,7 @@ const LedgerPage: React.FC = () => {
 
   const assets = useMemo(() => [...new Set(transactions.map((t: any) => String(t.asset || "").toUpperCase()).filter(Boolean))].sort(), [transactions]);
 
-  const assertReady = async () => {
-    await m.ensureWriteReady();
-  };
+  const assertReady = async () => { await m.ensureWriteReady(); };
 
   const addManual = async () => {
     const asset = resolveAssetSymbol(draft.asset);
@@ -101,8 +108,7 @@ const LedgerPage: React.FC = () => {
     await assertReady();
     await m.updateTransaction(id, { type: edit.type, asset, qty, price, fee, venue: edit.venue || undefined, note: edit.note || undefined });
     await hydrateFromBackend();
-    setEditingId(null);
-    setEdit({});
+    setEditingId(null); setEdit({});
   };
 
   const removeInline = async (id: string) => {
@@ -115,51 +121,30 @@ const LedgerPage: React.FC = () => {
     <section>
       <h1>Ledger</h1>
       <WriteStatusBanner status={m.writeStatus} onRetry={m.retryWriteReadiness} />
-
-      <div>
-        <span>Total txs: {stats.total}</span> · <span>Unique assets: {stats.uniqueAssets}</span> · <span>Buys: {stats.buys}</span> · <span>Sells: {stats.sells}</span> · <span>Total Buy Value: {stats.buyValue.toFixed(2)}</span> · <span>Total Sell Value: {stats.sellValue.toFixed(2)}</span>
-      </div>
-
-      <div>
-        {(["journal", "add", "import", "connect"] as Tab[]).map((t) => (
-          <button key={t} type="button" onClick={() => setTab(t)}>{t}</button>
-        ))}
-      </div>
+      <div><span>Total txs: {stats.total}</span> · <span>Unique assets: {stats.uniqueAssets}</span> · <span>Buys: {stats.buys}</span> · <span>Sells: {stats.sells}</span> · <span>Total Buy Value: {stats.buyValue.toFixed(2)}</span> · <span>Total Sell Value: {stats.sellValue.toFixed(2)}</span></div>
+      <div>{(["journal", "add", "import", "connect"] as Tab[]).map((t) => (<button key={t} type="button" onClick={() => setTab(t)}>{t}</button>))}</div>
 
       {tab === "journal" && (
         <div>
           <div>
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search" />
-            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
-              {["all", "buy", "sell", "transfer_in", "transfer_out", "reward", "adjustment"].map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
-            <select value={assetFilter} onChange={(e) => setAssetFilter(e.target.value)}>
-              <option value="all">all</option>
-              {assets.map((a) => <option key={a} value={a}>{a}</option>)}
-            </select>
+            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>{["all", "buy", "sell", "transfer_in", "transfer_out", "reward", "adjustment"].map((t) => <option key={t} value={t}>{t}</option>)}</select>
+            <select value={assetFilter} onChange={(e) => setAssetFilter(e.target.value)}><option value="all">all</option>{assets.map((a) => <option key={a} value={a}>{a}</option>)}</select>
           </div>
           <table>
             <thead><tr><th>Date</th><th>Type</th><th>Asset</th><th>Qty</th><th>Price</th><th>Fee</th><th>Venue</th><th>Note</th><th>Actions</th></tr></thead>
-            <tbody>
-              {filtered.map((tx: any) => {
-                const e = editingId === tx.id;
-                return (
-                  <tr key={tx.id}>
-                    <td>{new Date(Number(tx.timestamp || tx.ts)).toLocaleString()}</td>
-                    <td>{e ? <input value={String(edit.type ?? tx.type)} onChange={(v) => setEdit((d) => ({ ...d, type: v.target.value }))} /> : tx.type}</td>
-                    <td>{e ? <CoinAutocomplete value={String(edit.asset ?? tx.asset)} onChange={(v: string) => setEdit((d) => ({ ...d, asset: v }))} /> : tx.asset}</td>
-                    <td>{e ? <input value={String(edit.qty ?? tx.qty)} onChange={(v) => setEdit((d) => ({ ...d, qty: v.target.value }))} /> : tx.qty}</td>
-                    <td>{e ? <input value={String(edit.price ?? tx.price)} onChange={(v) => setEdit((d) => ({ ...d, price: v.target.value }))} /> : tx.price}</td>
-                    <td>{e ? <input value={String(edit.fee ?? tx.fee ?? "")} onChange={(v) => setEdit((d) => ({ ...d, fee: v.target.value }))} /> : tx.fee}</td>
-                    <td>{e ? <input value={String(edit.venue ?? tx.venue ?? "")} onChange={(v) => setEdit((d) => ({ ...d, venue: v.target.value }))} /> : tx.venue}</td>
-                    <td>{e ? <input value={String(edit.note ?? tx.note ?? "")} onChange={(v) => setEdit((d) => ({ ...d, note: v.target.value }))} /> : tx.note}</td>
-                    <td>
-                      {e ? (<><button onClick={() => void saveInline(tx.id)}>Save</button><button onClick={() => { setEditingId(null); setEdit({}); }}>Cancel</button></>) : (<><button onClick={() => { setEditingId(tx.id); setEdit(tx); }}>Edit</button><button onClick={() => void removeInline(tx.id)}>Delete</button></>)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
+            <tbody>{filtered.map((tx: any) => { const e = editingId === tx.id; return (
+              <tr key={tx.id}><td>{new Date(Number(tx.timestamp || tx.ts)).toLocaleString()}</td>
+                <td>{e ? <input value={String(edit.type ?? tx.type)} onChange={(v) => setEdit((d) => ({ ...d, type: v.target.value }))} /> : tx.type}</td>
+                <td>{e ? <CoinAutocomplete value={String(edit.asset ?? tx.asset)} onChange={(v: string) => setEdit((d) => ({ ...d, asset: v }))} /> : tx.asset}</td>
+                <td>{e ? <input value={String(edit.qty ?? tx.qty)} onChange={(v) => setEdit((d) => ({ ...d, qty: v.target.value }))} /> : tx.qty}</td>
+                <td>{e ? <input value={String(edit.price ?? tx.price)} onChange={(v) => setEdit((d) => ({ ...d, price: v.target.value }))} /> : tx.price}</td>
+                <td>{e ? <input value={String(edit.fee ?? tx.fee ?? "")} onChange={(v) => setEdit((d) => ({ ...d, fee: v.target.value }))} /> : tx.fee}</td>
+                <td>{e ? <input value={String(edit.venue ?? tx.venue ?? "")} onChange={(v) => setEdit((d) => ({ ...d, venue: v.target.value }))} /> : tx.venue}</td>
+                <td>{e ? <input value={String(edit.note ?? tx.note ?? "")} onChange={(v) => setEdit((d) => ({ ...d, note: v.target.value }))} /> : tx.note}</td>
+                <td>{e ? (<><button onClick={() => void saveInline(tx.id)}>Save</button><button onClick={() => { setEditingId(null); setEdit({}); }}>Cancel</button></>) : (<><button onClick={() => { setEditingId(tx.id); setEdit(tx); }}>Edit</button><button onClick={() => void removeInline(tx.id)}>Delete</button></>)}</td>
+              </tr>
+            ); })}</tbody>
           </table>
         </div>
       )}
@@ -178,11 +163,7 @@ const LedgerPage: React.FC = () => {
       )}
 
       {tab === "import" && (
-        <CSVImportPanel
-          state={importState}
-          onUpload={(f) => void importState.upload(f)}
-          onCommit={(mode) => void (assertReady().then(() => importState.commit(mode)))}
-        />
+        <CSVImportPanel state={importState} onUpload={(f) => void importState.upload(f)} onCommit={(mode) => void (assertReady().then(() => importState.commit(mode)))} />
       )}
 
       {tab === "connect" && <ExchangeConnect onConnected={() => void hydrateFromBackend()} />}

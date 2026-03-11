@@ -2,6 +2,8 @@ export type Exchange = "binance" | "bybit" | "okx" | "gate" | "mexc" | "kucoin" 
 
 export type NormalizedSide = "buy" | "sell" | "transfer_in" | "transfer_out" | "reward";
 
+export type ImportPreviewStatus = "new" | "duplicate" | "conflict" | "invalid";
+
 export interface NormalizedRow {
   rowIndex: number;
   exchange: Exchange;
@@ -16,6 +18,7 @@ export interface NormalizedRow {
   sourcePair?: string;
   note?: string;
   fingerprint?: string;
+  externalId?: string;
   status: "completed" | "pending" | "failed";
   fromAddress?: string;
   toAddress?: string;
@@ -29,4 +32,37 @@ export interface ParsedImportResult {
   confidence: number;
   rows: NormalizedRow[];
   headers: string[];
+}
+
+export interface ImportPreviewRow {
+  row: NormalizedRow;
+  status: ImportPreviewStatus;
+  reason?: string;
+  matchedTxId?: string;
+}
+
+export interface ExistingImportRow {
+  txId?: string;
+  fingerprint: string;
+  symbol: string;
+  timestampSec: number;
+  qty: number;
+  unitPrice: number;
+}
+
+export interface ImportAuditRecord {
+  id: string;
+  fileName: string;
+  fileHash?: string;
+  exchange: Exchange;
+  importedAt: number;
+  stats: {
+    parsed: number;
+    accepted: number;
+    duplicates: number;
+    conflicts: number;
+    invalid: number;
+  };
+  perSymbolBreakdown?: Record<string, number>;
+  canRollback?: boolean;
 }

@@ -1,15 +1,33 @@
-import { NormalizedRow } from "./importers/types";
-import { externalId, rowFingerprint } from "./importers/shared";
+import { ExistingImportRow, ImportPreviewRow, NormalizedRow } from "./importers/types";
+import { rowFingerprint } from "./importers/shared";
 
-export type PreviewStatus = "new" | "duplicate" | "conflict" | "invalid";
+export function classifyRowsWithDelta(rows: NormalizedRow[], existingRows: ExistingImportRow[]): ImportPreviewRow[] {
+  const existingByFp = new Map(existingRows.map(r => [r.fingerprint, r]));
+  const existingBySymbolTs = new Map<string, ExistingImportRow[]>();
+  for (const r of existingRows) {
+    const k = `${r.symbol}:${r.timestampSec}`;
+    const arr = existingBySymbolTs.get(k) || [];
+    arr.push(r);
+    existingBySymbolTs.set(k, arr);
+  }
 
-export function classifyRows(rows: NormalizedRow[], existsByFp: Record<string, boolean>, conflictIds: Set<string>) {
-  return rows.map((r) => {
-    if (r.invalidReason) return { row: r, status: "invalid" as PreviewStatus, reason: r.invalidReason };
-    const fp = r.fingerprint || rowFingerprint(r);
-    const xid = externalId(r);
-    if (existsByFp[fp]) return { row: r, status: "duplicate" as PreviewStatus, reason: "alreadyImported" };
-    if (conflictIds.has(xid)) return { row: r, status: "conflict" as PreviewStatus, reason: "qty/price changed" };
-    return { row: r, status: "new" as PreviewStatus };
+  return rows.map((row) => {
+    if (row.invalidReason) return { row, status: "invalid", reason: row.invalidReason };
+    const fp = row.fingerprint || rowFingerprint(row);
+    const exact = existingByFp.get(fp);
+    if (exact) return { row, status: "duplicate", reason: "alreadyImported", matchedTxId: exact.txId };
+
+    const k = `${row.symbol}:${Math.floor(row.timestamp / 1000)}`;
+    const sameSymbolTime = existingBySymbolTs.get(k) || [];
+    if (sameSymbolTime.length > 0) {
+      return {
+        row,
+        status: "conflict",
+        reason: "Delta detected for same coin/time. Qty or price changed.",
+        matchedTxId: sameSymbolTime[0].txId,
+      };
+    }
+
+    return { row, status: "new" };
   });
 }

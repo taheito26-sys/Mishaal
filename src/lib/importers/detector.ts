@@ -9,7 +9,7 @@ const signatures: Record<Exclude<Exchange, "unknown">, string[][]> = {
   kucoin: [["tradeCreatedAt", "symbol", "side"]],
 };
 
-export function detectExchange(headers: string[]): { exchange: Exchange; confidence: number } {
+export function detectExchange(headers: string[]): { exchange: Exchange; confidence: number; needsConfirmation: boolean } {
   const lower = headers.map(h => h.toLowerCase());
   let best: { exchange: Exchange; confidence: number } = { exchange: "unknown", confidence: 0 };
   for (const [ex, groups] of Object.entries(signatures) as [Exclude<Exchange,"unknown">, string[][]][]) {
@@ -19,6 +19,6 @@ export function detectExchange(headers: string[]): { exchange: Exchange; confide
       if (confidence > best.confidence) best = { exchange: ex, confidence };
     }
   }
-  if (best.confidence < 0.5) return { exchange: "unknown", confidence: best.confidence };
-  return best;
+  if (best.confidence < 0.5) return { exchange: "unknown", confidence: best.confidence, needsConfirmation: false };
+  return { ...best, needsConfirmation: best.confidence < 0.9 };
 }

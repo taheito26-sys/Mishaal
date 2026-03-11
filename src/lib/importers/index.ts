@@ -3,13 +3,13 @@ import { detectExchange } from "./detector";
 import { parseCSV } from "./shared";
 import { ParsedImportResult } from "./types";
 
-export async function importCSV(file: File): Promise<ParsedImportResult> {
+export async function importCSV(file: File): Promise<ParsedImportResult & { needsConfirmation: boolean }> {
   const text = await file.text();
   const { headers } = parseCSV(text);
   const detected = detectExchange(headers);
   if (detected.exchange === "unknown") {
-    return { exchange: "unknown", confidence: detected.confidence, rows: [], headers };
+    return { exchange: "unknown", confidence: detected.confidence, rows: [], headers, needsConfirmation: false };
   }
   const parsed = adapters[detected.exchange](text);
-  return { ...parsed, confidence: detected.confidence };
+  return { ...parsed, confidence: detected.confidence, needsConfirmation: detected.needsConfirmation };
 }

@@ -1,20 +1,15 @@
 import { useMemo, useState } from "react";
-import { classifyRows } from "../lib/dedup";
+import { classifyRowsWithDelta } from "../lib/dedup";
 import { importCSV } from "../lib/importers";
-import { NormalizedRow } from "../lib/importers/types";
-
-export interface ImportAuditRecord {
-  id: string;
-  importedAt: number;
-  fileName: string;
-  exchange: string;
-  stats: { parsed: number; accepted: number; rejected: number };
-}
+import { ExistingImportRow, ImportAuditRecord, ImportPreviewRow, NormalizedRow } from "../lib/importers/types";
 
 export function useImportState(deps: {
-  lookupImportRows: (args: { fingerprints: string[]; rows: NormalizedRow[]; exchange: string }) => Promise<{ exists: string[]; conflicts?: string[] }>;
+  lookupImportRows: (args: { rows: NormalizedRow[]; exchange: string }) => Promise<{ existingRows: ExistingImportRow[] }>;
   commitImportedTransactions: (args: { exchange: string; rows: NormalizedRow[]; onConflict: "skip" | "replace" }) => Promise<void>;
   createImportedFile: (args: any) => Promise<void>;
+  fetchImportHistory?: () => Promise<ImportAuditRecord[]>;
+  rollbackImport?: (importId: string) => Promise<void>;
+  clearImportedTransactions?: () => Promise<{ deleted: number }>;
   refresh: () => Promise<void>;
 }) {
   const [stage, setStage] = useState<"upload"|"preview"|"committing"|"done"|"error">("upload");
@@ -22,15 +17,27 @@ export function useImportState(deps: {
   const [confidence, setConfidence] = useState(0);
   const [fileName, setFileName] = useState<string>("");
   const [rows, setRows] = useState<NormalizedRow[]>([]);
-  const [preview, setPreview] = useState<any[]>([]);
+  const [preview, setPreview] = useState<ImportPreviewRow[]>([]);
   const [history, setHistory] = useState<ImportAuditRecord[]>([]);
+  const [editMap, setEditMap] = useState<Record<string, Partial<NormalizedRow>>>({});
+  const [lastAction, setLastAction] = useState<string>("");
 
   const stats = useMemo(() => {
     const parsed = preview.length;
     const accepted = preview.filter(p => p.status === "new" || p.status === "conflict").length;
-    const rejected = preview.filter(p => p.status === "invalid").length;
-    return { parsed, accepted, rejected };
+    const duplicates = preview.filter(p => p.status === "duplicate").length;
+    const conflicts = preview.filter(p => p.status === "conflict").length;
+    const invalid = preview.filter(p => p.status === "invalid").length;
+    return { parsed, accepted, duplicates, conflicts, invalid };
   }, [preview]);
+
+  const withEdits = (p: ImportPreviewRow): NormalizedRow => ({ ...p.row, ...(editMap[p.row.externalId || p.row.fingerprint || `${p.row.rowIndex}`] || {}) });
+
+  const refreshHistory = async () => {
+    if (!deps.fetchImportHistory) return;
+    const list = await deps.fetchImportHistory();
+    setHistory(list || []);
+  };
 
   const upload = async (file: File) => {
     setStage("upload");
@@ -39,26 +46,68 @@ export function useImportState(deps: {
     setDetectedExchange(parsed.exchange);
     setConfidence(parsed.confidence);
     setRows(parsed.rows);
-    const lookup = await deps.lookupImportRows({
-      fingerprints: parsed.rows.map(r => r.fingerprint || ""),
-      rows: parsed.rows,
-      exchange: parsed.exchange,
-    });
-    const exists = Object.fromEntries(lookup.exists.map(fp => [fp, true]));
-    setPreview(classifyRows(parsed.rows, exists, new Set(lookup.conflicts || [])));
+    const lookup = await deps.lookupImportRows({ rows: parsed.rows, exchange: parsed.exchange });
+    setPreview(classifyRowsWithDelta(parsed.rows, lookup.existingRows || []));
+    setEditMap({});
     setStage("preview");
+  };
+
+  const updatePreviewRow = (key: string, patch: Partial<NormalizedRow>) => {
+    setEditMap((m) => ({ ...m, [key]: { ...(m[key] || {}), ...patch } }));
   };
 
   const commit = async (onConflict: "skip" | "replace") => {
     setStage("committing");
-    const committable = preview.filter(p => p.status === "new" || p.status === "conflict").map(p => p.row as NormalizedRow);
-    await deps.commitImportedTransactions({ exchange: detectedExchange || "unknown", rows: committable, onConflict });
-    await deps.createImportedFile({ fileName, exchange: detectedExchange, stats, rowCount: rows.length });
+    const selected = preview
+      .filter(p => p.status === "new" || p.status === "conflict")
+      .map(withEdits)
+      .filter(r => !r.invalidReason);
+
+    await deps.commitImportedTransactions({ exchange: detectedExchange || "unknown", rows: selected, onConflict });
+    await deps.createImportedFile({
+      fileName,
+      exchange: detectedExchange,
+      stats,
+      rowCount: rows.length,
+      perSymbolBreakdown: selected.reduce((acc, r) => { acc[r.symbol] = (acc[r.symbol] || 0) + 1; return acc; }, {} as Record<string, number>),
+    });
     await deps.refresh();
-    const rec: ImportAuditRecord = { id: `${Date.now()}`, importedAt: Date.now(), fileName, exchange: detectedExchange || "unknown", stats };
-    setHistory(h => [rec, ...h]);
+    await refreshHistory();
+    setLastAction(`Committed ${selected.length} rows`);
     setStage("done");
   };
 
-  return { stage, detectedExchange, confidence, rows, preview, history, stats, upload, commit };
+  const rollback = async (importId: string) => {
+    if (!deps.rollbackImport) return;
+    await deps.rollbackImport(importId);
+    await deps.refresh();
+    await refreshHistory();
+    setLastAction(`Rolled back import ${importId}`);
+  };
+
+  const clearAllImported = async () => {
+    if (!deps.clearImportedTransactions) return;
+    const res = await deps.clearImportedTransactions();
+    await deps.refresh();
+    await refreshHistory();
+    setLastAction(`Cleared ${res?.deleted || 0} imported rows`);
+  };
+
+  return {
+    stage,
+    detectedExchange,
+    confidence,
+    rows,
+    preview,
+    history,
+    stats,
+    editMap,
+    lastAction,
+    upload,
+    commit,
+    rollback,
+    clearAllImported,
+    refreshHistory,
+    updatePreviewRow,
+  };
 }
