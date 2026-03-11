@@ -1,509 +1,160 @@
-import React, { useCallback, useMemo, useState } from "react";
-import { ExchangeConnect } from "../components/ExchangeConnect";
+import React, { useMemo, useState } from "react";
 import { CoinAutocomplete } from "../components/CoinAutocomplete";
+import { ExchangeConnect } from "../components/ExchangeConnect";
+import { CSVImportPanel } from "../components/CSVImport";
 import { useCryptoContext } from "../context/CryptoContext";
 import { useLedgerMutations } from "../hooks/useLedgerMutations";
-import { importCSV } from "../utils/importCSV";
+import { useImportState } from "../hooks/useImportState";
 
-type LedgerTab = "journal" | "add" | "import" | "connect";
-type WriteStatus = "unconfigured" | "unavailable" | "checking" | "ready";
+type Tab = "journal" | "add" | "import" | "connect";
 
-type ImportPreviewStatus = "new" | "alreadyImported" | "warning" | "invalid";
+type Draft = { type: string; asset: string; qty: string; price: string; fee: string; venue: string; note: string };
+const defaultDraft: Draft = { type: "buy", asset: "", qty: "", price: "", fee: "", venue: "", note: "" };
 
-type DraftTx = {
-  type: string;
-  asset: string;
-  qty: string;
-  price: string;
-  fee: string;
-  venue: string;
-  note: string;
-};
-
-type ParsedImportRow = {
-  rowId: string;
-  timestamp: number;
-  type: string;
-  asset: string;
-  qty: number;
-  price: number;
-  fee?: number;
-  venue?: string;
-  note?: string;
-  fingerprint?: string;
-  warning?: string;
-  invalidReason?: string;
-};
-
-type ImportPreviewRow = {
-  row: ParsedImportRow;
-  status: ImportPreviewStatus;
-  reason?: string;
-};
-
-const defaultDraft: DraftTx = {
-  type: "buy",
-  asset: "",
-  qty: "",
-  price: "",
-  fee: "",
-  venue: "",
-  note: "",
-};
-
-function parsePositiveNumber(v: string): number | null {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n;
-}
-
-function parseNonNegativeNumber(v: string): number | null {
-  if (v.trim() === "") return 0;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n < 0) return null;
-  return n;
-}
-
-function statusClass(status: ImportPreviewStatus): string {
-  if (status === "new") return "badge badge--good";
-  if (status === "alreadyImported") return "badge badge--muted";
-  if (status === "warning") return "badge badge--warn";
-  return "badge badge--bad";
-}
-
-const WriteStatusBanner: React.FC<{
-  status: WriteStatus;
-  onRetry: () => Promise<void>;
-}> = ({ status, onRetry }) => {
+const WriteStatusBanner: React.FC<{ status: string; onRetry: () => Promise<void> }> = ({ status, onRetry }) => {
   if (status === "ready") return null;
-
-  const copy = {
-    unconfigured: "Backend writes are not configured. Configure backend credentials to enable writes.",
-    unavailable: "Write backend is currently unavailable.",
-    checking: "Checking backend write readiness…",
-  } as const;
-
   return (
-    <div className="ledger-status-banner">
-      <strong>Write Status: {status}</strong>
-      <div>{copy[status as keyof typeof copy]}</div>
-      {status !== "checking" ? (
-        <button type="button" onClick={onRetry}>
-          Retry readiness check
-        </button>
-      ) : null}
+    <div>
+      <b>Write status: {status}</b>
+      <button type="button" onClick={() => void onRetry()} disabled={status === "checking"}>Retry</button>
     </div>
   );
 };
 
 const LedgerPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<LedgerTab>("journal");
-  const [draft, setDraft] = useState<DraftTx>(defaultDraft);
+  const [tab, setTab] = useState<Tab>("journal");
+  const [draft, setDraft] = useState<Draft>(defaultDraft);
   const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState<string>("all");
-  const [assetFilter, setAssetFilter] = useState<string>("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [assetFilter, setAssetFilter] = useState("all");
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState<Partial<DraftTx>>({});
-  const [importFile, setImportFile] = useState<File | null>(null);
-  const [importExchange, setImportExchange] = useState<string>("unknown");
-  const [importRows, setImportRows] = useState<ParsedImportRow[]>([]);
-  const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([]);
-  const [importError, setImportError] = useState<string | null>(null);
+  const [edit, setEdit] = useState<Partial<Draft>>({});
 
-  const {
-    transactions,
-    hydrateFromBackend,
-    resolveAssetSymbol,
-    isHydrating,
-  } = useCryptoContext();
+  const { transactions = [], hydrateFromBackend, resolveAssetSymbol } = useCryptoContext();
+  const m = useLedgerMutations();
 
-  const {
-    writeStatus,
-    ensureWriteReady,
-    retryWriteReadiness,
-    createTransaction,
-    updateTransaction,
-    deleteTransaction,
-    lookupImportRows,
-    commitImportedTransactions,
-    recordImportedFile,
-    isMutating,
-  } = useLedgerMutations();
-
-  const refreshCanonical = useCallback(async () => {
-    await hydrateFromBackend();
-  }, [hydrateFromBackend]);
-
-  const txs = transactions ?? [];
+  const importState = useImportState({
+    lookupImportRows: async ({ fingerprints, rows, exchange }) => {
+      if (m.lookupImportRows) return m.lookupImportRows({ fingerprints, rows, exchange });
+      return { exists: [], conflicts: [] };
+    },
+    commitImportedTransactions: async ({ exchange, rows, onConflict }) => {
+      await m.commitImportedTransactions({ exchange, rows, onConflict });
+    },
+    createImportedFile: async (payload) => {
+      if (m.createImportedFile) await m.createImportedFile(payload);
+      else if (m.recordImportedFile) await m.recordImportedFile(payload);
+    },
+    refresh: hydrateFromBackend,
+  });
 
   const stats = useMemo(() => {
-    const buys = txs.filter((t) => t.type === "buy");
-    const sells = txs.filter((t) => t.type === "sell");
-    const uniqueAssets = new Set(txs.map((t) => String(t.asset || "").toUpperCase()).filter(Boolean));
-    const totalBuyValue = buys.reduce((sum, t) => sum + (Number(t.qty) || 0) * (Number(t.price) || 0), 0);
-    const totalSellValue = sells.reduce((sum, t) => sum + (Number(t.qty) || 0) * (Number(t.price) || 0), 0);
+    const buys = transactions.filter((t: any) => t.type === "buy");
+    const sells = transactions.filter((t: any) => t.type === "sell");
     return {
-      totalTxs: txs.length,
-      uniqueAssets: uniqueAssets.size,
+      total: transactions.length,
+      uniqueAssets: new Set(transactions.map((t: any) => String(t.asset || "").toUpperCase())).size,
       buys: buys.length,
       sells: sells.length,
-      totalBuyValue,
-      totalSellValue,
+      buyValue: buys.reduce((s: number, t: any) => s + (Number(t.qty) || 0) * (Number(t.price) || 0), 0),
+      sellValue: sells.reduce((s: number, t: any) => s + (Number(t.qty) || 0) * (Number(t.price) || 0), 0),
     };
-  }, [txs]);
+  }, [transactions]);
 
-  const filteredJournal = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return [...txs]
-      .sort((a, b) => (Number(b.timestamp || b.ts) || 0) - (Number(a.timestamp || a.ts) || 0))
-      .filter((t) => {
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return [...transactions]
+      .sort((a: any, b: any) => Number(b.timestamp || b.ts) - Number(a.timestamp || a.ts))
+      .filter((t: any) => {
         if (typeFilter !== "all" && t.type !== typeFilter) return false;
         if (assetFilter !== "all" && String(t.asset || "").toUpperCase() !== assetFilter) return false;
-        if (!query) return true;
-        const hay = [
-          t.type,
-          t.asset,
-          t.venue,
-          t.note,
-          new Date(Number(t.timestamp || t.ts) || 0).toISOString(),
-        ]
-          .join(" ")
-          .toLowerCase();
-        return hay.includes(query);
+        if (!q) return true;
+        return [t.type, t.asset, t.note, t.venue].join(" ").toLowerCase().includes(q);
       });
-  }, [assetFilter, search, txs, typeFilter]);
+  }, [transactions, search, typeFilter, assetFilter]);
 
-  const assetOptions = useMemo(
-    () => [...new Set(txs.map((t) => String(t.asset || "").toUpperCase()).filter(Boolean))].sort(),
-    [txs],
-  );
+  const assets = useMemo(() => [...new Set(transactions.map((t: any) => String(t.asset || "").toUpperCase()).filter(Boolean))].sort(), [transactions]);
 
-  const handleAdd = useCallback(async () => {
-    const assetResolved = resolveAssetSymbol(draft.asset);
-    const qty = parsePositiveNumber(draft.qty);
-    const price = parsePositiveNumber(draft.price);
-    const fee = parseNonNegativeNumber(draft.fee);
+  const assertReady = async () => {
+    await m.ensureWriteReady();
+  };
 
-    if (!assetResolved || !qty || !price || fee === null) {
-      setImportError("Manual form invalid: asset, qty, and price must be valid; fee must be non-negative.");
-      return;
-    }
-
-    setImportError(null);
-    await ensureWriteReady();
-    await createTransaction({
-      type: draft.type,
-      asset: assetResolved,
-      qty,
-      price,
-      fee,
-      venue: draft.venue.trim() || undefined,
-      note: draft.note.trim() || undefined,
-    });
-    await refreshCanonical();
+  const addManual = async () => {
+    const asset = resolveAssetSymbol(draft.asset);
+    const qty = Number(draft.qty);
+    const price = Number(draft.price);
+    const fee = draft.fee.trim() ? Number(draft.fee) : 0;
+    if (!asset || !(qty > 0) || !(price >= 0) || fee < 0) return;
+    await assertReady();
+    await m.createTransaction({ type: draft.type, asset, qty, price, fee, venue: draft.venue || undefined, note: draft.note || undefined });
+    await hydrateFromBackend();
     setDraft(defaultDraft);
-    setActiveTab("journal");
-  }, [createTransaction, draft, ensureWriteReady, refreshCanonical, resolveAssetSymbol]);
+    setTab("journal");
+  };
 
-  const startEdit = useCallback((tx: any) => {
-    setEditingId(tx.id);
-    setEditDraft({
-      type: tx.type,
-      asset: tx.asset,
-      qty: String(tx.qty ?? ""),
-      price: String(tx.price ?? ""),
-      fee: String(tx.fee ?? ""),
-      venue: tx.venue ?? "",
-      note: tx.note ?? "",
-    });
-  }, []);
+  const saveInline = async (id: string) => {
+    const asset = resolveAssetSymbol(edit.asset || "");
+    const qty = Number(edit.qty);
+    const price = Number(edit.price);
+    const fee = String(edit.fee || "").trim() ? Number(edit.fee) : 0;
+    if (!asset || !(qty > 0) || !(price >= 0) || fee < 0 || !edit.type) return;
+    await assertReady();
+    await m.updateTransaction(id, { type: edit.type, asset, qty, price, fee, venue: edit.venue || undefined, note: edit.note || undefined });
+    await hydrateFromBackend();
+    setEditingId(null);
+    setEdit({});
+  };
 
-  const commitEdit = useCallback(
-    async (txId: string) => {
-      const resolved = resolveAssetSymbol(editDraft.asset || "");
-      const qty = parsePositiveNumber(String(editDraft.qty ?? ""));
-      const price = parsePositiveNumber(String(editDraft.price ?? ""));
-      const fee = parseNonNegativeNumber(String(editDraft.fee ?? ""));
-      if (!resolved || !qty || !price || fee === null || !editDraft.type) {
-        setImportError("Inline edit invalid. Please verify type/asset/qty/price/fee.");
-        return;
-      }
-
-      setImportError(null);
-      await ensureWriteReady();
-      await updateTransaction(txId, {
-        type: editDraft.type,
-        asset: resolved,
-        qty,
-        price,
-        fee,
-        venue: String(editDraft.venue ?? "").trim() || undefined,
-        note: String(editDraft.note ?? "").trim() || undefined,
-      });
-      await refreshCanonical();
-      setEditingId(null);
-      setEditDraft({});
-    },
-    [editDraft, ensureWriteReady, refreshCanonical, resolveAssetSymbol, updateTransaction],
-  );
-
-  const handleDelete = useCallback(
-    async (txId: string) => {
-      await ensureWriteReady();
-      await deleteTransaction(txId);
-      await refreshCanonical();
-    },
-    [deleteTransaction, ensureWriteReady, refreshCanonical],
-  );
-
-  const runImportPipeline = useCallback(
-    async (file: File) => {
-      setImportError(null);
-      setImportFile(file);
-
-      const parsed = await importCSV(file);
-      const rows = (parsed?.rows ?? []) as ParsedImportRow[];
-      const exchange = parsed?.exchange ?? "unknown";
-      setImportExchange(exchange);
-      setImportRows(rows);
-
-      const lookup = await lookupImportRows({
-        exchange,
-        rows,
-      });
-
-      const nextPreview: ImportPreviewRow[] = rows.map((row) => {
-        if (row.invalidReason) {
-          return { row, status: "invalid", reason: row.invalidReason };
-        }
-
-        const dedup = lookup.byFingerprint?.[row.fingerprint || ""];
-        if (dedup?.alreadyImported) {
-          return { row, status: "alreadyImported", reason: "Duplicate fingerprint found in backend." };
-        }
-
-        if (row.warning) {
-          return { row, status: "warning", reason: row.warning };
-        }
-
-        return { row, status: "new" };
-      });
-
-      setPreviewRows(nextPreview);
-    },
-    [lookupImportRows],
-  );
-
-  const commitImport = useCallback(async () => {
-    const committable = previewRows.filter((r) => r.status === "new" || r.status === "warning").map((r) => r.row);
-    if (committable.length === 0) {
-      setImportError("No committable rows. Only rows marked new/warning can be committed.");
-      return;
-    }
-
-    await ensureWriteReady();
-    await commitImportedTransactions({
-      exchange: importExchange,
-      rows: committable,
-    });
-
-    if (importFile) {
-      await recordImportedFile({
-        fileName: importFile.name,
-        exchange: importExchange,
-        rowsTotal: importRows.length,
-        rowsCommitted: committable.length,
-      });
-    }
-
-    await refreshCanonical();
-  }, [
-    commitImportedTransactions,
-    ensureWriteReady,
-    importExchange,
-    importFile,
-    importRows.length,
-    previewRows,
-    recordImportedFile,
-    refreshCanonical,
-  ]);
+  const removeInline = async (id: string) => {
+    await assertReady();
+    await m.deleteTransaction(id);
+    await hydrateFromBackend();
+  };
 
   return (
-    <section className="ledger-page">
+    <section>
       <h1>Ledger</h1>
-      <WriteStatusBanner status={writeStatus as WriteStatus} onRetry={retryWriteReadiness} />
+      <WriteStatusBanner status={m.writeStatus} onRetry={m.retryWriteReadiness} />
 
-      <div className="ledger-stats">
-        <div>Total txs: {stats.totalTxs}</div>
-        <div>Unique assets: {stats.uniqueAssets}</div>
-        <div>Buys: {stats.buys}</div>
-        <div>Sells: {stats.sells}</div>
-        <div>Total Buy Value: {stats.totalBuyValue.toFixed(2)}</div>
-        <div>Total Sell Value: {stats.totalSellValue.toFixed(2)}</div>
+      <div>
+        <span>Total txs: {stats.total}</span> · <span>Unique assets: {stats.uniqueAssets}</span> · <span>Buys: {stats.buys}</span> · <span>Sells: {stats.sells}</span> · <span>Total Buy Value: {stats.buyValue.toFixed(2)}</span> · <span>Total Sell Value: {stats.sellValue.toFixed(2)}</span>
       </div>
 
-      <div className="ledger-tabs">
-        {(["journal", "add", "import", "connect"] as LedgerTab[]).map((tab) => (
-          <button key={tab} type="button" onClick={() => setActiveTab(tab)} disabled={isMutating || isHydrating}>
-            {tab}
-          </button>
+      <div>
+        {(["journal", "add", "import", "connect"] as Tab[]).map((t) => (
+          <button key={t} type="button" onClick={() => setTab(t)}>{t}</button>
         ))}
       </div>
 
-      {importError ? <div className="ledger-error">{importError}</div> : null}
-
-      {activeTab === "journal" ? (
+      {tab === "journal" && (
         <div>
-          <div className="journal-filters">
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search txs" />
+          <div>
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search" />
             <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
-              {[
-                "all",
-                "buy",
-                "sell",
-                "transfer_in",
-                "transfer_out",
-                "reward",
-                "adjustment",
-              ].map((type) => (
-                <option key={type} value={type}>
-                  {type}
-                </option>
-              ))}
+              {["all", "buy", "sell", "transfer_in", "transfer_out", "reward", "adjustment"].map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
             <select value={assetFilter} onChange={(e) => setAssetFilter(e.target.value)}>
               <option value="all">all</option>
-              {assetOptions.map((asset) => (
-                <option key={asset} value={asset}>
-                  {asset}
-                </option>
-              ))}
+              {assets.map((a) => <option key={a} value={a}>{a}</option>)}
             </select>
           </div>
-
           <table>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Asset</th>
-                <th>Qty</th>
-                <th>Price</th>
-                <th>Fee</th>
-                <th>Venue</th>
-                <th>Note</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Date</th><th>Type</th><th>Asset</th><th>Qty</th><th>Price</th><th>Fee</th><th>Venue</th><th>Note</th><th>Actions</th></tr></thead>
             <tbody>
-              {filteredJournal.map((tx: any) => {
-                const isEditing = editingId === tx.id;
+              {filtered.map((tx: any) => {
+                const e = editingId === tx.id;
                 return (
                   <tr key={tx.id}>
-                    <td>{new Date(Number(tx.timestamp || tx.ts) || 0).toLocaleString()}</td>
+                    <td>{new Date(Number(tx.timestamp || tx.ts)).toLocaleString()}</td>
+                    <td>{e ? <input value={String(edit.type ?? tx.type)} onChange={(v) => setEdit((d) => ({ ...d, type: v.target.value }))} /> : tx.type}</td>
+                    <td>{e ? <CoinAutocomplete value={String(edit.asset ?? tx.asset)} onChange={(v: string) => setEdit((d) => ({ ...d, asset: v }))} /> : tx.asset}</td>
+                    <td>{e ? <input value={String(edit.qty ?? tx.qty)} onChange={(v) => setEdit((d) => ({ ...d, qty: v.target.value }))} /> : tx.qty}</td>
+                    <td>{e ? <input value={String(edit.price ?? tx.price)} onChange={(v) => setEdit((d) => ({ ...d, price: v.target.value }))} /> : tx.price}</td>
+                    <td>{e ? <input value={String(edit.fee ?? tx.fee ?? "")} onChange={(v) => setEdit((d) => ({ ...d, fee: v.target.value }))} /> : tx.fee}</td>
+                    <td>{e ? <input value={String(edit.venue ?? tx.venue ?? "")} onChange={(v) => setEdit((d) => ({ ...d, venue: v.target.value }))} /> : tx.venue}</td>
+                    <td>{e ? <input value={String(edit.note ?? tx.note ?? "")} onChange={(v) => setEdit((d) => ({ ...d, note: v.target.value }))} /> : tx.note}</td>
                     <td>
-                      {isEditing ? (
-                        <select
-                          value={editDraft.type ?? "buy"}
-                          onChange={(e) => setEditDraft((d) => ({ ...d, type: e.target.value }))}
-                        >
-                          {["buy", "sell", "transfer_in", "transfer_out", "reward", "adjustment"].map((t) => (
-                            <option key={t} value={t}>
-                              {t}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        tx.type
-                      )}
-                    </td>
-                    <td>
-                      {isEditing ? (
-                        <CoinAutocomplete
-                          value={String(editDraft.asset ?? "")}
-                          onChange={(v: string) => setEditDraft((d) => ({ ...d, asset: v }))}
-                        />
-                      ) : (
-                        tx.asset
-                      )}
-                    </td>
-                    <td>
-                      {isEditing ? (
-                        <input
-                          value={String(editDraft.qty ?? "")}
-                          onChange={(e) => setEditDraft((d) => ({ ...d, qty: e.target.value }))}
-                        />
-                      ) : (
-                        tx.qty
-                      )}
-                    </td>
-                    <td>
-                      {isEditing ? (
-                        <input
-                          value={String(editDraft.price ?? "")}
-                          onChange={(e) => setEditDraft((d) => ({ ...d, price: e.target.value }))}
-                        />
-                      ) : (
-                        tx.price
-                      )}
-                    </td>
-                    <td>
-                      {isEditing ? (
-                        <input
-                          value={String(editDraft.fee ?? "")}
-                          onChange={(e) => setEditDraft((d) => ({ ...d, fee: e.target.value }))}
-                        />
-                      ) : (
-                        tx.fee ?? 0
-                      )}
-                    </td>
-                    <td>
-                      {isEditing ? (
-                        <input
-                          value={String(editDraft.venue ?? "")}
-                          onChange={(e) => setEditDraft((d) => ({ ...d, venue: e.target.value }))}
-                        />
-                      ) : (
-                        tx.venue ?? ""
-                      )}
-                    </td>
-                    <td>
-                      {isEditing ? (
-                        <input
-                          value={String(editDraft.note ?? "")}
-                          onChange={(e) => setEditDraft((d) => ({ ...d, note: e.target.value }))}
-                        />
-                      ) : (
-                        tx.note ?? ""
-                      )}
-                    </td>
-                    <td>
-                      {isEditing ? (
-                        <>
-                          <button type="button" onClick={() => void commitEdit(tx.id)} disabled={isMutating}>
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingId(null);
-                              setEditDraft({});
-                            }}
-                            disabled={isMutating}
-                          >
-                            Cancel
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button type="button" onClick={() => startEdit(tx)} disabled={isMutating}>
-                            Edit
-                          </button>
-                          <button type="button" onClick={() => void handleDelete(tx.id)} disabled={isMutating}>
-                            Delete
-                          </button>
-                        </>
-                      )}
+                      {e ? (<><button onClick={() => void saveInline(tx.id)}>Save</button><button onClick={() => { setEditingId(null); setEdit({}); }}>Cancel</button></>) : (<><button onClick={() => { setEditingId(tx.id); setEdit(tx); }}>Edit</button><button onClick={() => void removeInline(tx.id)}>Delete</button></>)}
                     </td>
                   </tr>
                 );
@@ -511,110 +162,30 @@ const LedgerPage: React.FC = () => {
             </tbody>
           </table>
         </div>
-      ) : null}
+      )}
 
-      {activeTab === "add" ? (
-        <div className="ledger-add-form">
-          <label>
-            Type
-            <select value={draft.type} onChange={(e) => setDraft((d) => ({ ...d, type: e.target.value }))}>
-              {["buy", "sell", "transfer_in", "transfer_out", "reward", "adjustment"].map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Asset
-            <CoinAutocomplete
-              value={draft.asset}
-              onChange={(asset: string) => setDraft((d) => ({ ...d, asset }))}
-            />
-          </label>
-          <label>
-            Qty
-            <input value={draft.qty} onChange={(e) => setDraft((d) => ({ ...d, qty: e.target.value }))} />
-          </label>
-          <label>
-            Price
-            <input value={draft.price} onChange={(e) => setDraft((d) => ({ ...d, price: e.target.value }))} />
-          </label>
-          <label>
-            Fee
-            <input value={draft.fee} onChange={(e) => setDraft((d) => ({ ...d, fee: e.target.value }))} />
-          </label>
-          <label>
-            Venue
-            <input value={draft.venue} onChange={(e) => setDraft((d) => ({ ...d, venue: e.target.value }))} />
-          </label>
-          <label>
-            Note
-            <input value={draft.note} onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))} />
-          </label>
-          <button type="button" onClick={() => void handleAdd()} disabled={isMutating || writeStatus !== "ready"}>
-            Add transaction
-          </button>
-        </div>
-      ) : null}
-
-      {activeTab === "import" ? (
-        <div className="ledger-import">
-          <input
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void runImportPipeline(file);
-            }}
-          />
-
-          <div>Detected exchange: {importExchange}</div>
-
-          <table>
-            <thead>
-              <tr>
-                <th>Status</th>
-                <th>Timestamp</th>
-                <th>Type</th>
-                <th>Asset</th>
-                <th>Qty</th>
-                <th>Price</th>
-                <th>Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {previewRows.map((p) => (
-                <tr key={p.row.rowId}>
-                  <td>
-                    <span className={statusClass(p.status)}>{p.status}</span>
-                  </td>
-                  <td>{new Date(p.row.timestamp).toLocaleString()}</td>
-                  <td>{p.row.type}</td>
-                  <td>{p.row.asset}</td>
-                  <td>{p.row.qty}</td>
-                  <td>{p.row.price}</td>
-                  <td>{p.reason ?? ""}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          <button
-            type="button"
-            onClick={() => void commitImport()}
-            disabled={isMutating || writeStatus !== "ready" || previewRows.length === 0}
-          >
-            Commit import
-          </button>
-        </div>
-      ) : null}
-
-      {activeTab === "connect" ? (
+      {tab === "add" && (
         <div>
-          <ExchangeConnect onConnected={() => void refreshCanonical()} />
+          <select value={draft.type} onChange={(e) => setDraft((d) => ({ ...d, type: e.target.value }))}>{["buy", "sell", "transfer_in", "transfer_out", "reward", "adjustment"].map((t) => <option key={t}>{t}</option>)}</select>
+          <CoinAutocomplete value={draft.asset} onChange={(v: string) => setDraft((d) => ({ ...d, asset: v }))} />
+          <input placeholder="qty" value={draft.qty} onChange={(e) => setDraft((d) => ({ ...d, qty: e.target.value }))} />
+          <input placeholder="price" value={draft.price} onChange={(e) => setDraft((d) => ({ ...d, price: e.target.value }))} />
+          <input placeholder="fee" value={draft.fee} onChange={(e) => setDraft((d) => ({ ...d, fee: e.target.value }))} />
+          <input placeholder="venue" value={draft.venue} onChange={(e) => setDraft((d) => ({ ...d, venue: e.target.value }))} />
+          <input placeholder="note" value={draft.note} onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))} />
+          <button type="button" onClick={() => void addManual()}>Add Transaction</button>
         </div>
-      ) : null}
+      )}
+
+      {tab === "import" && (
+        <CSVImportPanel
+          state={importState}
+          onUpload={(f) => void importState.upload(f)}
+          onCommit={(mode) => void (assertReady().then(() => importState.commit(mode)))}
+        />
+      )}
+
+      {tab === "connect" && <ExchangeConnect onConnected={() => void hydrateFromBackend()} />}
     </section>
   );
 };
